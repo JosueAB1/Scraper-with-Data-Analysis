@@ -97,7 +97,8 @@ async def scrape_comics(limit: int = 200) -> list[dict]:
     page_size = 100  # max allowed by API
 
     async with httpx.AsyncClient(
-        headers={"User-Agent": "Mozilla/5.0"}
+        headers={"User-Agent": "Mozilla/5.0"},
+        follow_redirects=True
     ) as client:
         while len(results) < limit:
             logger.info(f"Comic Vine: fetching issues offset={offset}")
