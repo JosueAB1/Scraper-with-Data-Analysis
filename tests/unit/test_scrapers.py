@@ -7,7 +7,9 @@ Unit tests for parser functions (no network, no DB).
 import pytest
 from app.scrapers.open_library import OpenLibraryScraper
 from app.scrapers.comic_vine import ComicVineScraper
+from app.scrapers.comicbookrealm import ComicBookRealmScraper
 from app.utils.helpers import strip_html, safe_float, safe_int
+from bs4 import BeautifulSoup
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
@@ -30,7 +32,7 @@ def test_safe_int():
     assert safe_int(None) is None
 
 
-# ── Open Library parser ───────────────────────────────────────────────────────
+# ── Open Library ──────────────────────────────────────────────────────────────
 
 def test_parse_book_full():
     doc = {
@@ -63,7 +65,7 @@ def test_parse_book_minimal():
     assert result["description"] is None
 
 
-# ── Comic Vine parser ─────────────────────────────────────────────────────────
+# ── Comic Vine ────────────────────────────────────────────────────────────────
 
 def test_parse_issue_full():
     issue = {
@@ -92,3 +94,74 @@ def test_parse_issue_minimal():
     result = ComicVineScraper._parse_issue(issue)
     assert result["comic_vine_id"] == "1"
     assert result["title"] == "Unknown"
+
+
+# ── ComicBookRealm ────────────────────────────────────────────────────────────
+
+def _make_cbr_card(html: str):
+    """Helper — parse an HTML snippet into a BeautifulSoup tag."""
+    soup = BeautifulSoup(html, "html.parser")
+    return soup.find()
+
+
+def test_cbr_parse_card_full():
+    html = """
+    <div class="comic-item">
+        <a href="/comic/1234/batman-1">
+            <img src="https://comicbookrealm.com/covers/batman.jpg" />
+        </a>
+        <a href="/comic/1234/batman-1" class="title">Batman</a>
+        <span class="publisher">DC Comics</span>
+        <span class="issue">1</span>
+        <span class="year">1940</span>
+    </div>
+    """
+    scraper = ComicBookRealmScraper()
+    card = _make_cbr_card(html)
+    result = scraper._parse_card(card)
+
+    assert result is not None
+    assert result["title"] == "Batman"
+    assert result["publisher"] == "DC Comics"
+    assert result["issue_number"] == "1"
+    assert result["publish_date"] == "1940"
+    assert result["league_id"] == "1234"
+    assert result["source"] == "comicbookrealm"
+    assert "batman.jpg" in result["cover_url"]
+
+
+def test_cbr_parse_card_no_title_returns_none():
+    html = """<div class="comic-item"><span class="publisher">DC</span></div>"""
+    scraper = ComicBookRealmScraper()
+    card = _make_cbr_card(html)
+    result = scraper._parse_card(card)
+    assert result is None
+
+
+def test_cbr_parse_card_relative_url_becomes_absolute():
+    html = """
+    <div class="comic-item">
+        <a href="/comic/99/xmen" class="title">X-Men</a>
+    </div>
+    """
+    scraper = ComicBookRealmScraper()
+    card = _make_cbr_card(html)
+    result = scraper._parse_card(card)
+    assert result["source_url"].startswith("https://comicbookrealm.com")
+
+
+def test_cbr_parse_card_missing_optional_fields():
+    html = """
+    <div class="comic-item">
+        <a href="/comic/55/test" class="title">Test Comic</a>
+    </div>
+    """
+    scraper = ComicBookRealmScraper()
+    card = _make_cbr_card(html)
+    result = scraper._parse_card(card)
+
+    assert result["title"] == "Test Comic"
+    assert result["publisher"] is None
+    assert result["cover_url"] is None
+    assert result["issue_number"] is None
+    assert result["rating"] is None
