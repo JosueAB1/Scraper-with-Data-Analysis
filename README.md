@@ -1,6 +1,3 @@
-# Scraper-with-Data-Analysis
-A Python scraper to extracts data, stores it and generates visual insights with Pandas
-
 # 📚 Comics & Books API
 
 A production-grade REST API built with **FastAPI** that aggregates comic and book data from multiple sources via web scraping and public APIs. Designed as a portfolio project showcasing async Python, PostgreSQL, scheduled scrapers, and clean API design.
@@ -23,6 +20,7 @@ A production-grade REST API built with **FastAPI** that aggregates comic and boo
 - [API Reference](#-api-reference)
 - [Running the Scraper](#-running-the-scraper)
 - [Running Tests](#-running-tests)
+- [Known Limitations](#-known-limitations)
 - [Deployment](#-deployment)
 
 ---
@@ -34,11 +32,12 @@ A production-grade REST API built with **FastAPI** that aggregates comic and boo
 - **Search** by title and author (case-insensitive partial match)
 - **Filter** by genre, publisher, and data source
 - **Pagination** on all list endpoints
-- **Async scrapers** for 3 data sources (see below)
+- **Async scrapers** for 3 active data sources
 - **Weekly scheduled scraping** via APScheduler (cron)
 - **PostgreSQL** storage with SQLAlchemy 2.x async ORM
+- **Repository pattern** — all DB queries encapsulated
 - **Upsert logic** — re-running the scraper is always safe
-- **pytest test suite** with mocked HTTP calls (no real network in CI)
+- **pytest test suite** — unit + integration, 11 tests passing
 - **GitHub Actions CI** on every push
 
 ---
@@ -62,35 +61,49 @@ A production-grade REST API built with **FastAPI** that aggregates comic and boo
               ┌─────────────────────────────┐
               │        run_scraper.py        │
               │  (APScheduler — weekly cron) │
-              └──────┬──────────────┬────────┘
-                     │              │
-          ┌──────────▼──┐    ┌──────▼──────────────────┐
-          │ Open Library│    │ Comic Vine API (official) │
-          │  Search API │    │ League of Comic Geeks     │
-          │  Works API  │    │ (HTML scraping)           │
-          └─────────────┘    └───────────────────────────┘
+              └──────┬──────────┬────────────┘
+                     │          │
+          ┌──────────▼──┐  ┌────▼──────────────┐
+          │ Open Library│  │ Comic Vine API     │
+          │  Search API │  │ ComicBookRealm     │
+          │  Works API  │  │ (HTML scraping)    │
+          └─────────────┘  └────────────────────┘
 ```
 
 **Request flow:**
-1. Client sends `GET /api/v1/books?title=dune` with `X-API-Key: <key>` header
-2. FastAPI validates the API key via the `require_api_key` dependency
-3. Route handler queries PostgreSQL with filters + pagination
-4. Response is serialized by Pydantic and returned as JSON
-
-**Scraper flow (weekly):**
-1. APScheduler triggers `run_all_scrapers()` every Monday at 02:00 UTC
-2. Each scraper fetches data with polite delays between requests
-3. Data is upserted into PostgreSQL (safe to run multiple times)
+1. Client sends `GET /api/v1/books?title=dune` with `X-API-Key` header
+2. `deps.py` validates the API key via `require_api_key`
+3. Route calls `BookService` which calls `BookRepository`
+4. Repository queries PostgreSQL with filters + pagination
+5. Response is serialized by Pydantic and returned as JSON
 
 ---
 
 ## 🌐 Data Sources
 
-| Source | Type | Data |
-|--------|------|------|
-| [Open Library](https://openlibrary.org/developers/api) | Public API (no key needed) | Books: title, author, genres, description, cover, ISBN |
-| [Comic Vine](https://comicvine.gamespot.com/api/) | Public API (free key) | Comics: issues, publisher, characters, cover, dates |
-| [League of Comic Geeks](https://leagueofcomicgeeks.com) | HTML scraping | Comics: new releases, ratings, publisher |
+| Source | Type | Key Required | Status | Records |
+|--------|------|-------------|--------|---------|
+| [Open Library](https://openlibrary.org/developers/api) | Public API | No | ✅ Active | 233+ books |
+| [Comic Vine](https://comicvine.gamespot.com/api/) | Public API | Yes (free) | ✅ Active | 1M+ issues |
+| [ComicBookRealm](https://comicbookrealm.com) | HTML Scraping | No | ✅ Active | Browsable |
+| [League of Comic Geeks](https://leagueofcomicgeeks.com) | HTML Scraping | Account | ⚠️ Blocked | See below |
+
+### ⚠️ League of Comic Geeks — Cloudflare Protected
+
+League of Comic Geeks is protected by **Cloudflare with JavaScript challenges**. All scraping attempts return HTTP 403 regardless of session cookies, because Cloudflare verifies that requests originate from a real browser by executing JavaScript — something `httpx` cannot do.
+
+**Attempts made:**
+- Direct scraping with `httpx` → HTTP 403
+- Session cookies from authenticated account → HTTP 403 (Cloudflare challenge)
+
+**Planned solution for v2:** Use [Playwright](https://playwright.dev/python/) (headless Chromium) which executes real JavaScript and can pass Cloudflare challenges:
+
+```bash
+pip install playwright
+playwright install chromium
+```
+
+This is documented as a conscious technical decision — the scraper returns an empty list without breaking the weekly job.
 
 ---
 
@@ -99,43 +112,56 @@ A production-grade REST API built with **FastAPI** that aggregates comic and boo
 ```
 comics-books-api/
 ├── app/
-│   ├── main.py                  # FastAPI app, middleware, router registration
+│   ├── main.py                       Entry point — FastAPI app
 │   ├── api/
+│   │   ├── deps.py                   Centralized dependencies
 │   │   └── routes/
-│   │       ├── auth.py          # GET /auth/verify
-│   │       ├── books.py         # GET /books, GET /books/{id}
-│   │       └── comics.py        # GET /comics, GET /comics/{id}
+│   │       ├── auth.py               GET /api/v1/auth/verify
+│   │       ├── books.py              GET /api/v1/books, /books/{id}
+│   │       └── comics.py             GET /api/v1/comics, /comics/{id}
 │   ├── core/
-│   │   ├── config.py            # Settings loaded from .env (pydantic-settings)
-│   │   └── security.py          # API Key dependency
+│   │   ├── config.py                 Settings from .env
+│   │   ├── security.py               X-API-Key validation
+│   │   └── logging.py                Centralized logging setup
 │   ├── db/
-│   │   └── database.py          # Async engine, session factory, Base, init_db
+│   │   ├── database.py               Async engine + Base
+│   │   └── session.py                AsyncSessionLocal
 │   ├── models/
-│   │   ├── book.py              # SQLAlchemy Book ORM model
-│   │   └── comic.py             # SQLAlchemy Comic ORM model
-│   ├── schemas/
-│   │   └── schemas.py           # Pydantic request/response schemas
+│   │   ├── book.py                   PostgreSQL books table
+│   │   └── comic.py                  PostgreSQL comics table
+│   ├── repositories/
+│   │   ├── book_repository.py        All book DB queries
+│   │   └── comic_repository.py       All comic DB queries
+│   ├── services/
+│   │   ├── book_service.py           Book business logic
+│   │   ├── comic_service.py          Comic business logic
+│   │   └── data_service.py           Scraper orchestrator
 │   ├── scrapers/
-│   │   ├── open_library.py      # Open Library scraper
-│   │   ├── comic_vine.py        # Comic Vine API scraper
-│   │   └── league_of_comic_geeks.py  # HTML scraper
-│   └── services/
-│       └── data_service.py      # Upsert logic (scraper → DB bridge)
+│   │   ├── base_scraper.py           Abstract base class
+│   │   ├── open_library.py           Open Library scraper ✅
+│   │   ├── comic_vine.py             Comic Vine scraper ✅
+│   │   ├── comicbookrealm.py         ComicBookRealm scraper ✅
+│   │   └── league_of_comic_geeks.py  Blocked by Cloudflare ⚠️
+│   ├── schemas/
+│   │   ├── book_schema.py            Pydantic book schemas
+│   │   └── comic_schema.py           Pydantic comic schemas
+│   └── utils/
+│       └── helpers.py                strip_html, safe_float, etc.
+├── alembic/
+│   └── env.py                        Async migrations
 ├── scripts/
-│   └── run_scraper.py           # Standalone scraper runner + scheduler
+│   └── run_scraper.py                Manual runner + weekly scheduler
 ├── tests/
-│   ├── test_scrapers/
-│   │   └── test_scrapers.py     # Unit tests for parser functions
-│   └── test_routes/
-│       └── test_api.py          # Integration tests for API endpoints
-├── .github/
-│   └── workflows/
-│       └── ci.yml               # GitHub Actions CI pipeline
-├── .env.example                 # Template for environment variables
-├── .gitignore
-├── pytest.ini
-├── requirements.txt
-└── README.md
+│   ├── unit/
+│   │   ├── test_scrapers.py          Parser unit tests (11 passing)
+│   │   └── test_services.py          Service tests with mocked repos
+│   └── integration/
+│       └── test_api.py               Endpoint integration tests
+├── .github/workflows/ci.yml          GitHub Actions CI
+├── .env.example
+├── alembic.ini
+├── pyproject.toml
+└── requirements.txt
 ```
 
 ---
@@ -143,268 +169,186 @@ comics-books-api/
 ## 🚀 Quick Start
 
 ### Prerequisites
-
 - Python 3.12+
-- PostgreSQL 14+ running locally (or a hosted instance)
+- PostgreSQL 14+ running locally
 
-### Step 1 — Clone the repository
+### Step 1 — Clone and set up environment
 
 ```bash
 git clone https://github.com/yourusername/comics-books-api.git
 cd comics-books-api
-```
 
-### Step 2 — Create a virtual environment
-
-```bash
 python -m venv venv
-source venv/bin/activate        # macOS / Linux
-# venv\Scripts\activate         # Windows
-```
+source venv/bin/activate        # Mac/Linux
+# .\venv\Scripts\Activate.ps1   # Windows PowerShell
 
-### Step 3 — Install dependencies
-
-```bash
 pip install -r requirements.txt
 ```
 
-### Step 4 — Configure environment variables
+### Step 2 — Configure environment
 
 ```bash
 cp .env.example .env
 ```
 
-Open `.env` and fill in your values:
+Edit `.env`:
 
 ```env
 DATABASE_URL=postgresql+asyncpg://postgres:yourpassword@localhost:5432/comics_books_db
-API_KEYS=my-secret-key-123
-COMIC_VINE_API_KEY=your_comic_vine_key   # get free at comicvine.gamespot.com/api/
+API_KEYS=generate-with-python-secrets
+COMIC_VINE_API_KEY=your-key-from-comicvine.gamespot.com
+DEBUG=false
 ```
 
-### Step 5 — Create the database
+Generate a secure API key:
+```bash
+python -c "import secrets; print(secrets.token_hex(32))"
+```
+
+### Step 3 — Create database and run migrations
 
 ```bash
-# In psql or pgAdmin, run:
+# Create DB (run in psql)
 CREATE DATABASE comics_books_db;
+
+# Apply migrations
+alembic upgrade head
 ```
 
-Tables are created automatically when the app starts.
-
-### Step 6 — Start the API server
+### Step 4 — Start the API
 
 ```bash
 uvicorn app.main:app --reload
 ```
 
-Visit **http://localhost:8000/docs** to explore the interactive Swagger UI.
+Visit **http://localhost:8000/docs** for the interactive Swagger UI.
+
+### Step 5 — Run the scraper (separate terminal)
+
+```bash
+.\venv\Scripts\Activate.ps1
+python scripts/run_scraper.py
+```
 
 ---
 
 ## ⚙️ Configuration
 
-All configuration is done via environment variables (loaded from `.env`):
-
 | Variable | Description | Default |
 |----------|-------------|---------|
-| `DATABASE_URL` | PostgreSQL async connection string | `postgresql+asyncpg://...` |
-| `API_KEYS` | Comma-separated valid API keys | `change-me-in-env` |
-| `COMIC_VINE_API_KEY` | Your Comic Vine API key | _(empty)_ |
-| `ALLOWED_ORIGINS` | CORS origins (JSON array) | `["*"]` |
-| `SCRAPER_DELAY_SECONDS` | Polite delay between scraper requests | `1.5` |
-| `SCRAPER_MAX_RETRIES` | Retry attempts per failed request | `3` |
-| `SCRAPE_CRON` | APScheduler cron expression | `0 2 * * 1` (Monday 2am) |
+| `DATABASE_URL` | PostgreSQL async connection string | — |
+| `API_KEYS` | Comma-separated valid API keys | — |
+| `COMIC_VINE_API_KEY` | Free key from comicvine.gamespot.com | — |
+| `DEBUG` | Enable SQL query logging | `false` |
+| `SCRAPER_DELAY_SECONDS` | Delay between HTTP requests | `1.5` |
+| `SCRAPER_MAX_RETRIES` | Retry attempts per request | `3` |
+| `SCRAPE_CRON` | APScheduler cron expression | `0 2 * * 1` |
 
 ---
 
 ## 📡 API Reference
 
-All endpoints require the `X-API-Key` header.
-
-### Authentication
-
-```http
-GET /api/v1/auth/verify
-X-API-Key: your-api-key
-```
-
-```json
-{ "status": "authenticated", "key_prefix": "your-api..." }
-```
-
----
+All endpoints require `X-API-Key` header.
 
 ### Books
 
-#### List books
-
 ```http
-GET /api/v1/books
-X-API-Key: your-api-key
+GET /api/v1/books?title=dune&genre=fantasy&page=1&page_size=20
+GET /api/v1/books/{id}
 ```
-
-**Query parameters:**
-
-| Param | Type | Description |
-|-------|------|-------------|
-| `title` | string | Partial title search |
-| `author` | string | Partial author search |
-| `genre` | string | Filter by genre |
-| `page` | int | Page number (default: 1) |
-| `page_size` | int | Results per page (1–100, default: 20) |
-
-**Example request:**
-
-```bash
-curl -H "X-API-Key: your-api-key" \
-  "http://localhost:8000/api/v1/books?genre=fantasy&page=1&page_size=5"
-```
-
-**Example response:**
-
-```json
-{
-  "total": 142,
-  "page": 1,
-  "page_size": 5,
-  "results": [
-    {
-      "id": 1,
-      "title": "A Wizard of Earthsea",
-      "author": "Ursula K. Le Guin",
-      "genres": ["fantasy", "young adult"],
-      "publish_year": 1968,
-      "page_count": 183,
-      "cover_url": "https://covers.openlibrary.org/b/id/8739161-M.jpg",
-      "scraped_at": "2024-11-18T02:00:00"
-    }
-  ]
-}
-```
-
-#### Get book by ID
-
-```bash
-curl -H "X-API-Key: your-api-key" \
-  "http://localhost:8000/api/v1/books/1"
-```
-
----
 
 ### Comics
 
-#### List comics
+```http
+GET /api/v1/comics?publisher=Marvel&source=comic_vine&page=1
+GET /api/v1/comics/{id}
+```
+
+### Auth
 
 ```http
-GET /api/v1/comics
-X-API-Key: your-api-key
+GET /api/v1/auth/verify
 ```
 
-**Query parameters:**
-
-| Param | Type | Description |
-|-------|------|-------------|
-| `title` | string | Partial title search |
-| `genre` | string | Filter by genre |
-| `publisher` | string | Filter by publisher (e.g. `Marvel`) |
-| `source` | string | `comic_vine` or `league_of_comic_geeks` |
-| `page` | int | Page number |
-| `page_size` | int | Results per page (1–100) |
-
-**Example request:**
-
-```bash
-curl -H "X-API-Key: your-api-key" \
-  "http://localhost:8000/api/v1/comics?publisher=Marvel&page=1"
-```
-
-**Example response:**
+**Example response — GET /api/v1/books:**
 
 ```json
 {
-  "total": 87,
+  "total": 233,
   "page": 1,
   "page_size": 20,
   "results": [
     {
-      "id": 3,
-      "title": "Amazing Spider-Man",
-      "issue_number": "1",
-      "publisher": "Marvel",
-      "characters": ["Spider-Man", "Mary Jane"],
-      "cover_url": "https://comicvine.gamespot.com/...",
-      "publish_date": "2022-01-01",
-      "source": "comic_vine",
-      "scraped_at": "2024-11-18T02:00:00"
+      "id": 1,
+      "title": "Dune",
+      "author": "Frank Herbert",
+      "genres": ["science fiction"],
+      "publish_year": 1965,
+      "scraped_at": "2026-03-26T22:38:58"
     }
   ]
 }
-```
-
-#### Get comic by ID
-
-```bash
-curl -H "X-API-Key: your-api-key" \
-  "http://localhost:8000/api/v1/comics/3"
 ```
 
 ---
 
 ## 🕷 Running the Scraper
 
-### Manual run (one-time)
-
 ```bash
+# Run all scrapers immediately + start weekly scheduler
 python scripts/run_scraper.py
 ```
 
-This runs all three scrapers immediately, then starts the weekly scheduler.
+**First run results (March 26, 2026):**
 
-### Scheduler only (skip immediate run)
-
-To run only the scheduler without the immediate first run, edit `scripts/run_scraper.py` and comment out the `await run_all_scrapers()` line before the scheduler start.
+| Scraper | Result |
+|---------|--------|
+| Open Library | ✅ 233 books |
+| Comic Vine | ✅ Active (1M+ issues available) |
+| ComicBookRealm | ✅ Active |
+| League of Comic Geeks | ⚠️ 0 — Cloudflare blocked |
 
 ---
 
 ## 🧪 Running Tests
 
 ```bash
+# All tests
 pytest -v
+
+# Unit tests only
+pytest tests/unit/ -v
+
+# Integration tests only
+pytest tests/integration/ -v
 ```
 
-Tests are fully isolated — they mock all HTTP calls and database sessions. No real network or database required.
+Current status: **11 tests passing**
 
-```
-tests/test_scrapers/test_scrapers.py  ← Parser unit tests
-tests/test_routes/test_api.py         ← API integration tests
-```
+---
+
+## ⚠️ Known Limitations
+
+### League of Comic Geeks — Cloudflare
+The site uses Cloudflare JavaScript challenges that block `httpx`-based scrapers. The scraper returns an empty list gracefully. Planned fix in v2 using Playwright headless browser.
+
+### Comic Vine — User-Agent required
+The Comic Vine API returns HTTP 403 without a browser-like `User-Agent` header, and HTTP 301 without `follow_redirects=True`. Both are handled in the scraper.
 
 ---
 
 ## 🚢 Deployment
 
-### Option A — Run on a VPS (e.g. DigitalOcean, Hetzner)
+### Railway (easiest)
+1. Push repo to GitHub
+2. Connect to railway.app
+3. Add PostgreSQL service
+4. Set environment variables
+5. Start command: `uvicorn app.main:app --host 0.0.0.0 --port $PORT`
+6. Add second service for scraper: `python scripts/run_scraper.py`
 
-```bash
-# On your server:
-git clone https://github.com/yourusername/comics-books-api.git
-cd comics-books-api
-pip install -r requirements.txt
-cp .env.example .env && nano .env
-
-# Start API (use a process manager like systemd or supervisor in production)
-uvicorn app.main:app --host 0.0.0.0 --port 8000
-
-# Start scraper scheduler in a separate process
-python scripts/run_scraper.py
-```
-
-### Option B — Railway / Render (free tier)
-
-1. Push this repo to GitHub
-2. Connect to Railway or Render
-3. Add environment variables in the dashboard
-4. Set start command to `uvicorn app.main:app --host 0.0.0.0 --port $PORT`
+### Render
+Same as Railway — use Background Worker for the scraper service.
 
 ---
 
@@ -412,17 +356,18 @@ python scripts/run_scraper.py
 
 | Tool | Purpose |
 |------|---------|
-| [FastAPI](https://fastapi.tiangolo.com) | Web framework + OpenAPI docs |
-| [SQLAlchemy 2.x](https://docs.sqlalchemy.org) | Async ORM |
-| [asyncpg](https://github.com/MagicStack/asyncpg) | PostgreSQL async driver |
-| [Pydantic v2](https://docs.pydantic.dev) | Data validation & serialization |
-| [httpx](https://www.python-httpx.org) | Async HTTP client for scrapers |
-| [BeautifulSoup4](https://www.crummy.com/software/BeautifulSoup/) | HTML parsing |
-| [APScheduler](https://apscheduler.readthedocs.io) | Weekly cron scheduling |
-| [pytest](https://pytest.org) + [respx](https://lundberg.github.io/respx/) | Testing |
+| FastAPI 0.115 | Web framework + auto OpenAPI docs |
+| SQLAlchemy 2.x | Async ORM |
+| asyncpg | PostgreSQL async driver |
+| Pydantic v2 | Data validation |
+| httpx | Async HTTP client |
+| BeautifulSoup4 | HTML parsing |
+| APScheduler | Weekly cron scheduling |
+| Alembic | DB migrations |
+| pytest + respx | Testing |
 
 ---
 
 ## 📄 License
 
-MIT License — see [LICENSE](LICENSE) for details.
+MIT License
