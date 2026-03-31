@@ -1,15 +1,22 @@
 """
 League of Comic Geeks Scraper
 ==============================
-League of Comic Geeks (leagueofcomicgeeks.com) doesn't have a public API,
-so we use HTTP scraping with httpx + BeautifulSoup.
+STATUS: Bloqueado por Cloudflare — pendiente para v2.
 
-We scrape the "New Releases" and "Popular" pages, respecting robots.txt
-and adding polite delays between requests.
+Intentos realizados:
+  - Scraping directo con httpx → HTTP 403
+  - Cookies de sesión de cuenta activa → HTTP 403 (Cloudflare challenge)
 
-Scraped pages:
-  - /comics/new-releases  → newest issues
-  - /comics/browse        → popular/top-rated comics
+Causa: El sitio usa Cloudflare con JavaScript challenges que verifican
+que el request provenga de un navegador real. httpx no puede pasar
+esta verificación sin ejecutar JavaScript.
+
+Solución propuesta para v2:
+  - Usar Playwright (navegador headless Chromium) que ejecuta JS real
+  - pip install playwright && playwright install chromium
+  - Esto permitiría pasar el challenge y usar las cookies de sesión
+
+Por ahora el scraper retorna lista vacía sin romper el job completo.
 """
 
 import asyncio
