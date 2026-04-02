@@ -327,13 +327,70 @@ Current status: **11 tests passing**
 
 ---
 
-## ⚠️ Known Limitations
+## ⚠️ Known Issues (Real World Scraping Problems)
 
-### League of Comic Geeks — Cloudflare
-The site uses Cloudflare JavaScript challenges that block `httpx`-based scrapers. The scraper returns an empty list gracefully. Planned fix in v2 using Playwright headless browser.
+> These are real problems encountered during development — not hypothetical. Each one was diagnosed, documented, and either solved or consciously deferred.
 
-### Comic Vine — User-Agent required
-The Comic Vine API returns HTTP 403 without a browser-like `User-Agent` header, and HTTP 301 without `follow_redirects=True`. Both are handled in the scraper.
+### HTML structure changes can break parsers
+
+HTML scrapers depend on specific CSS selectors. If a site redesigns its layout, selectors stop matching and the scraper returns 0 results silently.
+
+**How this project handles it:**
+- Multiple fallback selectors are tried in order for each field
+- The scraper logs which selector matched (visible with `DEBUG=true`)
+- If no selector matches, a warning is logged with an HTML preview
+- Empty results are logged explicitly so they don't go unnoticed
+
+**To debug a broken parser:**
+```env
+# In .env — enable SQL and HTTP debug logging
+DEBUG=true
+```
+Then check the terminal output for lines like:
+```
+WARNING — No selector matched — HTML structure may have changed
+DEBUG   — HTML preview: <!DOCTYPE html>...
+```
+
+---
+
+### Some sources return empty responses intermittently
+
+HTTP scrapers can return 0 results due to redirects, temporary blocks, or URL changes — even when the scraper code is correct.
+
+**Real case in this project:** ComicBookRealm's `/search` URL returned HTTP 302 to `/search/comics/?a=search&series=search&method=all`. The original scraper didn't follow redirects, so every request silently failed.
+
+**Fix applied:** `BaseScraper._make_client()` now sets `follow_redirects=True` globally. All redirect chains are logged in DEBUG mode.
+
+**Comic Vine** also returned HTTP 301 and HTTP 403 without a browser `User-Agent`. Both fixed by inheriting the correct headers from `BaseScraper`.
+
+---
+
+### Cloudflare blocking prevents static scraping
+
+**League of Comic Geeks** is protected by Cloudflare JavaScript challenges. All requests return HTTP 403 regardless of session cookies, because Cloudflare requires a real browser to execute JavaScript before granting access.
+
+**What was tried:**
+- Direct scraping with `httpx` → HTTP 403
+- Session cookies from an authenticated account → HTTP 403
+
+**Why not bypassed:** Implementing a Cloudflare bypass with tools like `undetected-chromedriver` introduces fragile, maintenance-heavy code. The scraper returns `[]` gracefully without crashing the scheduler.
+
+**Planned for v2:** Use [Playwright](https://playwright.dev/python/) (headless Chromium) which passes the JavaScript challenge natively:
+```bash
+pip install playwright
+playwright install chromium
+```
+
+---
+
+### Comic Vine — Headers and redirects required
+
+The Comic Vine API has two non-obvious requirements not mentioned in their docs:
+- Returns HTTP 403 without `User-Agent: Mozilla/5.0`
+- Returns HTTP 301 without `follow_redirects=True`
+
+Both discovered through iterative testing and now handled in `BaseScraper`.
 
 ---
 
