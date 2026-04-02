@@ -1,6 +1,11 @@
 """
 Book database model.
 Maps to the `books` table in PostgreSQL.
+
+Fix applied:
+  - genres changed from String(512) to Text — Open Library returns
+    very long genre strings that exceed 512 characters
+  - publisher changed from String(256) to Text for same reason
 """
 
 from datetime import datetime
@@ -24,11 +29,11 @@ class Book(Base):
     author: Mapped[str | None] = mapped_column(String(256))
     description: Mapped[str | None] = mapped_column(Text)
     cover_url: Mapped[str | None] = mapped_column(String(512))
-    genres: Mapped[str | None] = mapped_column(String(512))  # comma-separated
+    genres: Mapped[str | None] = mapped_column(Text)        # Text — can exceed 512 chars
     language: Mapped[str | None] = mapped_column(String(16))
     publish_year: Mapped[int | None] = mapped_column(Integer)
     page_count: Mapped[int | None] = mapped_column(Integer)
-    publisher: Mapped[str | None] = mapped_column(String(256))
+    publisher: Mapped[str | None] = mapped_column(Text)     # Text — multiple publishers
     source_url: Mapped[str | None] = mapped_column(String(512))
 
     # ── Audit ─────────────────────────────────────────────────────────────────

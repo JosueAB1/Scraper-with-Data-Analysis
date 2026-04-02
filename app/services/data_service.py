@@ -4,11 +4,9 @@ app/services/data_service.py
 Top-level orchestrator: runs all scrapers and delegates persistence
 to BookService and ComicService.
 
-Scrapers registered:
-  1. Open Library    → books
-  2. Comic Vine      → comics
-  3. ComicBookRealm  → comics  ✅ added
-  4. League of Comic Geeks → comics (pending session cookie)
+Fix applied:
+  - scrape_cbr_comics() argument changed from max_pages_per_letter
+    to max_pages (updated in comicbookrealm.py refactor)
 """
 
 import logging
@@ -46,7 +44,7 @@ async def run_full_scrape(db: AsyncSession) -> dict:
 
     # ── 3. Comics — ComicBookRealm ─────────────────────────────────────────
     logger.info("[ 3/3 ] Scraping ComicBookRealm …")
-    cbr_comics = await scrape_cbr_comics(max_pages_per_letter=2)
+    cbr_comics = await scrape_cbr_comics(max_pages=3)   # fixed: was max_pages_per_letter
     summary["comicbookrealm_comics"] = await comic_service.upsert_bulk(cbr_comics)
 
     logger.info(f"Full scrape complete — summary: {summary}")

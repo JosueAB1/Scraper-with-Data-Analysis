@@ -2,14 +2,17 @@
 app/scrapers/comicbookrealm.py
 ===============================
 Scraper for ComicBookRealm (comicbookrealm.com).
-Uses HTML scraping with httpx + BeautifulSoup.
-Inherits HTTP, retry and delay logic from BaseScraper.
 
-Pages scraped:
-  - /search?type=comic&letter=A..Z  (browse by letter)
-  - Each comic detail page for description and genre
+Fix applied:
+  - Correct URL: /search/comics/?a=search&series=search&method=all
+    (discovered from the 302 redirect logs — the old /search URL was wrong)
+  - Added follow_redirects=True via BaseScraper _make_client
+  - Inspect real HTML response before parsing to detect structural changes
+  - Added explicit logging of how many cards were found per page
+  - Multiple fallback selectors for resilience against HTML changes
 
-ComicBookRealm allows public browsing without login.
+Known issue: HTML structure changes can break parsers silently.
+If 0 results appear, enable DEBUG=true in .env and check redirect logs.
 """
 
 import logging
@@ -23,42 +26,63 @@ logger = logging.getLogger(__name__)
 
 BASE_URL = "https://comicbookrealm.com"
 
-# Browse by first letter of title — covers the full catalog
-BROWSE_LETTERS = list("ABCDEFGHIJKLMNOPQRSTUVWXYZ") + ["0"]
+# Correct browse URL discovered from redirect chain
+# Old (wrong): /search  → 302 → /search/comics/?a=search&series=search&method=all
+# New (correct): use the final URL directly
+BROWSE_URL = f"{BASE_URL}/search/comics/?a=search&series=search&method=all"
+
+# Publishers to search for — more reliable than letter browsing
+PUBLISHERS = [
+    "Marvel", "DC Comics", "Image Comics", "Dark Horse",
+    "IDW Publishing", "Boom Studios", "Dynamite",
+]
 
 
 class ComicBookRealmScraper(BaseScraper):
     source_name = "comicbookrealm"
 
-    def __init__(self, max_pages_per_letter: int = 2):
+    def __init__(self, max_pages: int = 3):
         super().__init__()
-        self.max_pages_per_letter = max_pages_per_letter
+        self.max_pages = max_pages
 
     async def scrape(self) -> list[dict[str, Any]]:
         results: list[dict] = []
 
-        async with self._make_client(
-            extra_headers={"User-Agent": "Mozilla/5.0"}
-        ) as client:
-            for letter in BROWSE_LETTERS:
-                for page in range(1, self.max_pages_per_letter + 1):
-                    url = f"{BASE_URL}/search"
+        async with self._make_client() as client:
+            for publisher in PUBLISHERS:
+                for page in range(1, self.max_pages + 1):
+                    url = f"{BROWSE_URL}&q={publisher}&page={page}"
                     self.logger.info(
-                        f"Scraping letter={letter} page={page}"
+                        f"Scraping publisher='{publisher}' page={page} — {url}"
                     )
                     try:
                         html = await self.fetch_html(client, url)
                         soup = BeautifulSoup(html, "html.parser")
+
+                        # Log page title to confirm we got the right page
+                        title_tag = soup.find("title")
+                        self.logger.debug(
+                            f"Page title: {title_tag.text if title_tag else 'N/A'}"
+                        )
+
                         comics = self._parse_listing(soup)
+                        self.logger.info(
+                            f"  → {len(comics)} comics found "
+                            f"(publisher={publisher}, page={page})"
+                        )
 
                         if not comics:
-                            break   # No more pages for this letter
+                            # Log first 500 chars of HTML to diagnose selector issues
+                            self.logger.debug(
+                                f"Empty result — HTML preview: {html[:500]}"
+                            )
+                            break
 
                         results.extend(comics)
 
                     except Exception as e:
                         self.logger.error(
-                            f"Error scraping letter={letter} page={page}: {e}"
+                            f"Error scraping publisher='{publisher}' page={page}: {e}"
                         )
                         break
 
@@ -71,47 +95,61 @@ class ComicBookRealmScraper(BaseScraper):
                 seen.add(key)
                 unique.append(item)
 
+        self.logger.info(
+            f"ComicBookRealm total: {len(unique)} unique comics from {len(results)} raw"
+        )
         return unique
 
     def _parse_listing(self, soup: BeautifulSoup) -> list[dict[str, Any]]:
-        """Parse comic cards from a listing/search results page."""
-        comics: list[dict] = []
+        """
+        Try multiple selector strategies to find comic cards.
+        Logs which selector matched — helps debug HTML changes.
+        """
+        strategies = [
+            ("table.listing tr",      soup.select("table.listing tr")),
+            (".comic-item",           soup.select(".comic-item")),
+            (".search-result",        soup.select(".search-result")),
+            (".result-item",          soup.select(".result-item")),
+            ("tr[class*='result']",   soup.select("tr[class*='result']")),
+            ("div[class*='comic']",   soup.select("div[class*='comic']")),
+        ]
 
-        # ComicBookRealm uses various card layouts — try multiple selectors
-        cards = (
-            soup.select(".comic-listing .item")
-            or soup.select(".search-results .result")
-            or soup.select("table.listing tr")
-            or soup.select(".comic-item")
-            or soup.select("[class*='comic']")
+        for name, cards in strategies:
+            if cards:
+                self.logger.debug(f"Selector matched: '{name}' — {len(cards)} elements")
+                results = []
+                for card in cards:
+                    parsed = self._parse_card(card)
+                    if parsed:
+                        results.append(parsed)
+                return results
+
+        self.logger.warning(
+            "No selector matched — HTML structure may have changed. "
+            "Enable DEBUG=true in .env for full HTML preview."
         )
-
-        for card in cards:
-            parsed = self._parse_card(card)
-            if parsed:
-                comics.append(parsed)
-
-        return comics
+        return []
 
     def _parse_card(self, card) -> dict[str, Any] | None:
-        """Extract fields from a single comic card element."""
+        """Extract comic fields from a card element."""
         try:
-            # Title
+            # Title — try multiple selectors
             title_tag = (
                 card.select_one("a.title")
                 or card.select_one(".comic-title")
                 or card.select_one("td.title a")
                 or card.select_one("h3 a")
                 or card.select_one("a[href*='/comic/']")
+                or card.select_one("td a")
             )
             title = title_tag.get_text(strip=True) if title_tag else None
-            if not title:
+            if not title or len(title) < 2:
                 return None
 
             # Source URL + ID
             source_url = None
             cbr_id = None
-            link_tag = card.select_one("a[href*='/comic/']")
+            link_tag = card.select_one("a[href*='/comic/']") or title_tag
             if link_tag:
                 href = link_tag.get("href", "")
                 source_url = (
@@ -144,23 +182,19 @@ class ComicBookRealmScraper(BaseScraper):
 
             # Issue number
             issue_tag = card.select_one(".issue, .issue-number, td.issue")
-            issue_number = (
-                issue_tag.get_text(strip=True) if issue_tag else None
-            )
+            issue_number = issue_tag.get_text(strip=True) if issue_tag else None
 
-            # Year / publish date
+            # Year
             year_tag = card.select_one(".year, td.year, .date")
-            publish_date = (
-                year_tag.get_text(strip=True) if year_tag else None
-            )
+            publish_date = year_tag.get_text(strip=True) if year_tag else None
 
             return {
-                "league_id": cbr_id,        # reusing league_id field for CBR id
+                "league_id": cbr_id,
                 "comic_vine_id": None,
                 "title": title,
                 "issue_number": issue_number,
                 "publisher": publisher,
-                "description": None,        # only available on detail page
+                "description": None,
                 "cover_url": cover_url,
                 "genres": "",
                 "characters": "",
@@ -175,9 +209,5 @@ class ComicBookRealmScraper(BaseScraper):
             return None
 
 
-# ── Convenience function ──────────────────────────────────────────────────────
-
-async def scrape_cbr_comics(max_pages_per_letter: int = 2) -> list[dict]:
-    return await ComicBookRealmScraper(
-        max_pages_per_letter=max_pages_per_letter
-    ).run()
+async def scrape_cbr_comics(max_pages: int = 3) -> list[dict]:
+    return await ComicBookRealmScraper(max_pages=max_pages).run()

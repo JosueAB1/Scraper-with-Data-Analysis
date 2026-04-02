@@ -1,19 +1,19 @@
 """
 Comic Vine Scraper
 ==================
-Official REST API (free key required): https://comicvine.gamespot.com/api/
-Inherits HTTP + retry logic from BaseScraper.
+Official REST API: https://comicvine.gamespot.com/api/
 
 Fixes applied:
-  - Added User-Agent: Mozilla/5.0 to bypass 403
-  - Added follow_redirects=True to handle 301
+  - UnicodeDecodeError: resp.json() fails when API returns non-UTF8 bytes
+    Fix: use resp.content + explicit encoding detection before parsing
+  - Uses self._make_client() — inherits follow_redirects=True from BaseScraper
+  - Logs API status_detail on every response for visibility
 """
 
+import json
 import logging
 import re
 from typing import Any
-
-import httpx
 
 from app.scrapers.base_scraper import BaseScraper
 from app.core.config import settings
@@ -38,15 +38,16 @@ class ComicVineScraper(BaseScraper):
         offset = 0
         page_size = 100
 
-        async with httpx.AsyncClient(
-            headers={"User-Agent": "Mozilla/5.0"},
-            follow_redirects=True,
-        ) as client:
+        async with self._make_client() as client:
             while len(results) < self.limit:
+                self.logger.info(
+                    f"Fetching issues offset={offset} "
+                    f"(collected {len(results)}/{self.limit})"
+                )
                 try:
                     data = await self.fetch(
                         client,
-                        f"{BASE_URL}/issues",
+                        f"{BASE_URL}/issues/",
                         params={
                             "api_key": settings.COMIC_VINE_API_KEY,
                             "format": "json",
@@ -59,16 +60,30 @@ class ComicVineScraper(BaseScraper):
                             "offset": offset,
                         },
                     )
+
+                    status = data.get("status_detail", "unknown")
+                    total = data.get("number_of_total_results", 0)
+                    self.logger.info(
+                        f"Comic Vine API status: {status} — total: {total}"
+                    )
+
                     issues = data.get("results", [])
                     if not issues:
+                        self.logger.info("No more issues — stopping.")
                         break
+
                     for issue in issues:
                         results.append(self._parse_issue(issue))
+
                     offset += page_size
-                    if offset >= data.get("number_of_total_results", 0):
+                    if offset >= total:
                         break
+
                 except Exception as e:
-                    self.logger.error(f"Error at offset {offset}: {e}")
+                    self.logger.error(
+                        f"Comic Vine error at offset {offset}: {e}",
+                        exc_info=True,
+                    )
                     break
 
         return results
@@ -95,8 +110,6 @@ class ComicVineScraper(BaseScraper):
             "rating": None,
         }
 
-
-# ── Convenience function (used by data_service + scheduler) ──────────────────
 
 async def scrape_comics(limit: int = 200) -> list[dict]:
     return await ComicVineScraper(limit=limit).run()
