@@ -205,3 +205,21 @@ cython_debug/
 marimo/_static/
 marimo/_lsp/
 __marimo__/
+
+# Archivos temporales de diagnóstico
+test_cbr2.py
+test_cbr3.py
+test_cbr4.py
+test_cv2.py
+test_cv3.py
+test_league.py
+check_db.py
+
+# Datasets CSV
+*.csv
+
+# Modelo temporal en raíz
+comic.py
+
+# Script de importación
+import_comics_csv.py
